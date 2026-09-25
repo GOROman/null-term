@@ -581,7 +581,7 @@ impl Channel {
             return;
         }
         let path = format!(
-            "pasotsu-{}-{}.log",
+            "null-term-{}-{}.log",
             self.name(),
             chrono::Local::now().format("%Y%m%d-%H%M%S")
         );

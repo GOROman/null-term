@@ -19,11 +19,11 @@ use crate::channel::{self, encoding_label, Newline};
 use crate::App;
 
 pub fn default_socket() -> PathBuf {
-    if let Ok(p) = std::env::var("PASOTSU_SOCK") {
+    if let Ok(p) = std::env::var("NULL_TERM_SOCK") {
         return p.into();
     }
     let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
-    std::env::temp_dir().join(format!("pasotsu-term-{user}.sock"))
+    std::env::temp_dir().join(format!("null-term-{user}.sock"))
 }
 
 pub struct CtlRequest {
@@ -43,7 +43,7 @@ pub struct PendingWait {
 pub fn spawn_server(path: &Path, tx: Sender<CtlRequest>) -> Result<()> {
     if path.exists() {
         if UnixStream::connect(path).is_ok() {
-            bail!("制御ソケットは使用中です (別の pasotsu-term が起動中?): {}", path.display());
+            bail!("制御ソケットは使用中です (別の null-term が起動中?): {}", path.display());
         }
         std::fs::remove_file(path)?;
     }
@@ -432,7 +432,7 @@ pub enum CtlCmd {
     Focus { ch: String },
     /// 利用可能なポート一覧
     Ports,
-    /// pasotsu-term を終了
+    /// null-term を終了
     Quit,
     /// JSON リクエストをそのまま送る
     Raw { json: String },
@@ -451,7 +451,7 @@ fn request(stream: &mut UnixStream, reader: &mut BufReader<UnixStream>, req: &Va
     let mut line = String::new();
     reader.read_line(&mut line)?;
     if line.is_empty() {
-        bail!("pasotsu-term から応答がありません");
+        bail!("null-term から応答がありません");
     }
     Ok(serde_json::from_str(&line)?)
 }
@@ -459,7 +459,7 @@ fn request(stream: &mut UnixStream, reader: &mut BufReader<UnixStream>, req: &Va
 /// CLI クライアント。戻り値はプロセスの終了コード
 pub fn client(socket: &Path, cmd: CtlCmd) -> Result<i32> {
     let mut stream = UnixStream::connect(socket).with_context(|| {
-        format!("pasotsu-term に接続できません ({}). 起動していますか?", socket.display())
+        format!("null-term に接続できません ({}). 起動していますか?", socket.display())
     })?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut plain_text = false;

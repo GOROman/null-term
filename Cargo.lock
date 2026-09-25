@@ -561,6 +561,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "null-term"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "encoding_rs",
+ "ratatui",
+ "regex",
+ "serde_json",
+ "serialport",
+ "vt100",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -602,21 +617,6 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link",
-]
-
-[[package]]
-name = "pasotsu-term"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "encoding_rs",
- "ratatui",
- "regex",
- "serde_json",
- "serialport",
- "vt100",
 ]
 
 [[package]]

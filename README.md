@@ -1,11 +1,11 @@
-# pasotsu-term
+# null-term
 
 パソコン通信用の 2 画面シリアルターミナル。画面を上下に分割し、USB-UART 2ch を同時に扱えます。
 
 ```
 cargo build --release
-./target/release/pasotsu-term --list                       # ポート一覧
-./target/release/pasotsu-term /dev/cu.usbserial-A:2400 /dev/cu.usbserial-B:9600:7E1
+./target/release/null-term --list                       # ポート一覧
+./target/release/null-term /dev/cu.usbserial-A:2400 /dev/cu.usbserial-B:9600:7E1
 ```
 
 ポート指定は `PATH[:BAUD[:FMT]]`（FMT 例: `8N1` `7E1`）。省略した画面は起動後に `Ctrl-A p` で選べます。
@@ -37,7 +37,7 @@ cargo build --release
 | n | 改行コード切替 |
 | h | BackSpace を BS/DEL 切替 |
 | l | ローカルエコー |
-| L | 受信ログを `pasotsu-A-日時.log` に保存 開始/停止 |
+| L | 受信ログを `null-term-A-日時.log` に保存 開始/停止 |
 | c | 画面消去 |
 | Ctrl-L | 表示が崩れたときに全体を描き直す |
 | z | アクティブ画面を最大化 |
@@ -50,25 +50,25 @@ cargo build --release
 上画面 (A) は紺、下画面 (B) はえんじの背景で表示し、タイトル行には接続状態・bps・データ形式・文字コード・送受信バイト数と、
 接続時に `ATI3` で取得したモデム名を表示します。
 
-## 外部からの操作（`pasotsu-term ctl`）
+## 外部からの操作（`null-term ctl`）
 
-起動中の pasotsu-term は Unix ドメインソケットで外部からの操作を受け付けます。
-ソケットの既定は `$TMPDIR/pasotsu-term-$USER.sock`（`--socket` か環境変数 `PASOTSU_SOCK` で変更）。
+起動中の null-term は Unix ドメインソケットで外部からの操作を受け付けます。
+ソケットの既定は `$TMPDIR/null-term-$USER.sock`（`--socket` か環境変数 `NULL_TERM_SOCK` で変更）。
 画面なしで動かす場合は `--headless` を付けて起動します。
 
 ```sh
-pasotsu-term --headless /dev/cu.usbserial-XXXX:2400 &      # 画面なし起動 (普通の TUI 起動中でも操作可)
+null-term --headless /dev/cu.usbserial-XXXX:2400 &      # 画面なし起動 (普通の TUI 起動中でも操作可)
 
-pasotsu-term ctl send A 'AT\r' -x OK -t 3                  # 送信して "OK" を待ち、受信テキストを表示
-pasotsu-term ctl send A 'ATDT2\r' -x 'CONNECT|NO CARRIER|BUSY' -t 60
-pasotsu-term ctl wait A 'login:' -t 30                     # 直前の send/wait 以降の受信から正規表現を待つ
-pasotsu-term ctl read A                                    # 前回以降の受信テキストを取得
-pasotsu-term ctl screen A                                  # 画面の内容をテキストで取得
-pasotsu-term ctl sendhex A 1b5b41                          # バイト列をそのまま送信
-pasotsu-term ctl baud A 2400                               # bps 変更
-pasotsu-term ctl open B /dev/cu.usbserial-YYYY -b 9600     # ポートを開く
-pasotsu-term ctl status                                    # 状態 (JSON)
-pasotsu-term ctl quit
+null-term ctl send A 'AT\r' -x OK -t 3                  # 送信して "OK" を待ち、受信テキストを表示
+null-term ctl send A 'ATDT2\r' -x 'CONNECT|NO CARRIER|BUSY' -t 60
+null-term ctl wait A 'login:' -t 30                     # 直前の send/wait 以降の受信から正規表現を待つ
+null-term ctl read A                                    # 前回以降の受信テキストを取得
+null-term ctl screen A                                  # 画面の内容をテキストで取得
+null-term ctl sendhex A 1b5b41                          # バイト列をそのまま送信
+null-term ctl baud A 2400                               # bps 変更
+null-term ctl open B /dev/cu.usbserial-YYYY -b 9600     # ポートを開く
+null-term ctl status                                    # 状態 (JSON)
+null-term ctl quit
 ```
 
 - `send` のテキストは `\r` `\n` `\t` `\e` `\xNN` を展開し、そのチャンネルの文字コードに変換して送ります。改行の自動付加はしません。
@@ -88,7 +88,7 @@ pasotsu-term ctl quit
 （実績: A = aiwa PV-PF24MK2, B = I-O DATA DFML-560, 2400bps V.42bis で接続）
 
 ```sh
-pasotsu-term /dev/cu.usbserial-XXXX:2400 /dev/cu.PL2303G-USBtoUART1230:2400
+null-term /dev/cu.usbserial-XXXX:2400 /dev/cu.PL2303G-USBtoUART1230:2400
 ```
 
 1. 両モデムを初期化: A/B それぞれで `AT&F`
@@ -99,13 +99,13 @@ pasotsu-term /dev/cu.usbserial-XXXX:2400 /dev/cu.PL2303G-USBtoUART1230:2400
 4. 着信側 (B): `RING` が出たら `ATA`。ベル検出が不安定な場合は `RING` を待たず、発信の数秒後に `ATA` を送る
 5. `CONNECT 2400/V.42bis` が出たら上下の画面でそのまま文字をやり取りできる
 6. 切断は次のどちらか
-   - `Ctrl-A H`（または `pasotsu-term ctl hangup A`）: DTR を一瞬落として切る（モデムが `&D2` のとき。`AT&F` 後は通常これ）
+   - `Ctrl-A H`（または `null-term ctl hangup A`）: DTR を一瞬落として切る（モデムが `&D2` のとき。`AT&F` 後は通常これ）
    - 1 秒以上何も打たずに待つ → `+++`（Enter なし）→ 1 秒待って `OK` → `ATH0`
 
 外部操作で行う場合:
 
 ```sh
-P=pasotsu-term
+P=null-term
 $P ctl send A 'AT&F\r' -x OK;  $P ctl send B 'AT&F\r' -x OK
 $P ctl send B 'AT+MS=2,1,300,2400\r' -x OK
 $P ctl send A 'ATX1S7=60DT0\r' -x ATDT0

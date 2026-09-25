@@ -1,4 +1,4 @@
-//! pasotsu-term: パソコン通信用 2 画面 (上下分割) シリアルターミナル
+//! null-term: パソコン通信用 2 画面 (上下分割) シリアルターミナル
 
 mod channel;
 mod ctl;
@@ -30,7 +30,7 @@ use channel::{Channel, Newline, PortConfig, SerialEvent, BAUD_RATES, ENCODINGS};
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
-    /// 外部制御ソケットのパス (既定: $PASOTSU_SOCK または $TMPDIR/pasotsu-term-$USER.sock)
+    /// 外部制御ソケットのパス (既定: $NULL_TERM_SOCK または $TMPDIR/null-term-$USER.sock)
     #[arg(short, long, global = true)]
     socket: Option<PathBuf>,
     /// 画面を出さずに外部制御だけで動かす
@@ -68,7 +68,7 @@ struct Args {
 
 #[derive(clap::Subcommand, Debug)]
 enum Command {
-    /// 起動中の pasotsu-term を外部から操作する
+    /// 起動中の null-term を外部から操作する
     #[command(subcommand)]
     Ctl(ctl::CtlCmd),
 }
@@ -172,7 +172,7 @@ fn main() -> Result<()> {
     ctl::spawn_server(&socket, ctl_tx)?;
 
     let result = if args.headless {
-        eprintln!("pasotsu-term: headless 起動 (制御ソケット {})", socket.display());
+        eprintln!("null-term: headless 起動 (制御ソケット {})", socket.display());
         for ch in &app.channels {
             eprintln!("  {}: {} {}", ch.name(), ch.cfg.path.as_deref().unwrap_or("-"), ch.status);
         }
