@@ -3,6 +3,7 @@
 mod channel;
 mod ctl;
 mod keys;
+mod transfer;
 mod ui;
 
 use std::io::stdout;
@@ -20,6 +21,7 @@ use ratatui::crossterm::execute;
 use serialport::FlowControl;
 
 use channel::{Channel, Newline, PortConfig, SerialEvent, BAUD_RATES, ENCODINGS};
+use transfer::{Direction, Protocol};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -85,7 +87,22 @@ pub enum Mode {
 pub enum Popup {
     Baud { sel: usize, custom: String },
     Port { ports: Vec<String>, sel: usize },
+    /// XMODEM / YMODEM の送受信ダイアログ
+    Transfer { dir: Direction, proto: usize, path: String, error: Option<String> },
     Help,
+}
+
+/// 受信ダイアログの保存先の既定値
+fn default_recv_path(p: Protocol) -> String {
+    if p == Protocol::Ymodem { ".".into() } else { "download.bin".into() }
+}
+
+/// `~/` をホームディレクトリに展開する
+pub fn expand_path(s: &str) -> PathBuf {
+    match (s.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => PathBuf::from(s),
+    }
 }
 
 pub struct App {
@@ -210,6 +227,7 @@ fn run(
             dirty = true;
         }
         for ch in app.channels.iter_mut() {
+            dirty |= ch.poll_transfer();
             dirty |= ch.poll_probe();
             dirty |= ch.poll_reconnect(&app.tx);
         }
@@ -258,6 +276,12 @@ fn handle_key(app: &mut App, k: KeyEvent) {
         Mode::Normal => {
             if is_ctrl_a(&k) {
                 app.mode = Mode::Prefix;
+            } else if app.channels[app.active].transfer.is_some() {
+                // 転送中はキー入力を送らない。Esc / Ctrl-X で中止
+                let ctrl_x = k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('x');
+                if k.code == KeyCode::Esc || ctrl_x {
+                    app.channels[app.active].cancel_transfer();
+                }
             } else {
                 let ch = &mut app.channels[app.active];
                 if let Some(bytes) = keys::key_to_bytes(&k, ch) {
@@ -313,6 +337,12 @@ fn handle_command(app: &mut App, k: KeyEvent) {
         KeyCode::Char('c') => ch.clear(),
         KeyCode::Char('r') => ch.open(&tx),
         KeyCode::Char('i') => ch.probe_modem(),
+        KeyCode::Char('u') | KeyCode::Char('d') => {
+            let dir = if k.code == KeyCode::Char('u') { Direction::Send } else { Direction::Recv };
+            let proto = Protocol::ALL.iter().position(|&p| p == Protocol::Ymodem).unwrap();
+            let path = if dir == Direction::Send { String::new() } else { default_recv_path(Protocol::Ymodem) };
+            app.popup = Some(Popup::Transfer { dir, proto, path, error: None });
+        }
         KeyCode::Char('H') => ch.hangup(),
         KeyCode::Char('x') => ch.close(),
         KeyCode::Char('L') => ch.toggle_log(),
@@ -358,6 +388,40 @@ fn handle_popup_key(app: &mut App, k: KeyEvent) {
     let mut close = matches!(k.code, KeyCode::Esc);
     match popup {
         Popup::Help => close = true,
+        Popup::Transfer { dir, proto, path, error } => match k.code {
+            KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::Up | KeyCode::Down => {
+                let old = Protocol::ALL[*proto];
+                let n = Protocol::ALL.len();
+                *proto = if matches!(k.code, KeyCode::Left | KeyCode::Up) { (*proto + n - 1) % n } else { (*proto + 1) % n };
+                // 受信先が既定値のままなら新しいプロトコル用の既定値にする
+                if *dir == Direction::Recv && *path == default_recv_path(old) {
+                    *path = default_recv_path(Protocol::ALL[*proto]);
+                }
+                *error = None;
+            }
+            KeyCode::Char(c) => {
+                path.push(c);
+                *error = None;
+            }
+            KeyCode::Backspace => {
+                path.pop();
+                *error = None;
+            }
+            KeyCode::Enter => {
+                let p = Protocol::ALL[*proto];
+                let result = match dir {
+                    Direction::Send => {
+                        ch.start_upload(p, path.split_whitespace().map(expand_path).collect())
+                    }
+                    Direction::Recv => ch.start_download(p, expand_path(path.trim())),
+                };
+                match result {
+                    Ok(()) => close = true,
+                    Err(e) => *error = Some(format!("{e:#}")),
+                }
+            }
+            _ => {}
+        },
         Popup::Baud { sel, custom } => match k.code {
             KeyCode::Up => *sel = sel.saturating_sub(1),
             KeyCode::Down => *sel = (*sel + 1).min(BAUD_RATES.len() - 1),

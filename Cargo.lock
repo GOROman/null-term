@@ -562,7 +562,7 @@ dependencies = [
 
 [[package]]
 name = "null-term"
-version = "1.0.0"
+version = "1.10.0"
 dependencies = [
  "anyhow",
  "chrono",

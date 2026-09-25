@@ -4,10 +4,11 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::channel::{encoding_label, Channel, BAUD_RATES};
+use crate::transfer::{Direction, Protocol, Transfer};
 use crate::{App, Mode, Popup};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -28,8 +29,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         f.render_widget(Paragraph::new(title_line(ch, active)).style(title_style(i, active)), title);
         ch.resize(body.height, body.width);
         render_screen(ch.parser.screen(), body, f.buffer_mut(), PANE_BG[i]);
+        if let Some(t) = &ch.transfer {
+            let bar = Rect::new(body.x, body.y + body.height - 1, body.width, 1);
+            draw_progress(f, t, bar);
+        }
         let screen = ch.parser.screen();
-        if active && app.popup.is_none() && screen.scrollback() == 0 && !screen.hide_cursor() {
+        if active
+            && app.popup.is_none()
+            && ch.transfer.is_none()
+            && screen.scrollback() == 0
+            && !screen.hide_cursor()
+        {
             let (r, c) = screen.cursor_position();
             f.set_cursor_position((body.x + c.min(body.width - 1), body.y + r.min(body.height - 1)));
         }
@@ -94,7 +104,7 @@ fn status_line(app: &App) -> Line<'static> {
     match app.mode {
         Mode::Prefix => Line::from(vec![
             Span::styled(" Ctrl-A ", Style::new().fg(Color::Black).bg(Color::Yellow)),
-            Span::raw(" Tab:切替 b:bps p:ポート i:モデム名 e:文字コード n:改行 l:エコー c:消去 r:再接続 x:切断 H:回線切断 L:ログ z:最大化 [:履歴 ?:ヘルプ q:終了"),
+            Span::raw(" Tab:切替 b:bps p:ポート i:モデム名 e:文字コード n:改行 l:エコー c:消去 r:再接続 x:切断 H:回線切断 u:送信 d:受信 L:ログ z:最大化 [:履歴 ?:ヘルプ q:終了"),
         ]),
         Mode::Scroll => Line::from(vec![
             Span::styled(" 履歴 ", Style::new().fg(Color::Black).bg(Color::Cyan)),
@@ -110,6 +120,10 @@ fn status_line(app: &App) -> Line<'static> {
             Span::raw(" 画面切替  "),
             Span::styled(" Ctrl-A b ", key),
             Span::raw(" bps  "),
+            Span::styled(" Ctrl-A u ", key),
+            Span::raw(" 送信  "),
+            Span::styled(" Ctrl-A d ", key),
+            Span::raw(" 受信  "),
             Span::styled(" Ctrl-A ? ", key),
             Span::raw(" ヘルプ  "),
             Span::styled(" Ctrl-A q ", key),
@@ -170,6 +184,42 @@ fn render_screen(screen: &vt100::Screen, area: Rect, buf: &mut Buffer, bg: Color
     }
 }
 
+fn human(n: u64) -> String {
+    if n >= 1024 * 1024 {
+        format!("{:.1}MB", n as f64 / 1048576.0)
+    } else if n >= 1024 {
+        format!("{:.1}KB", n as f64 / 1024.0)
+    } else {
+        format!("{n}B")
+    }
+}
+
+/// 転送中の進捗バー (画面の最下行)
+fn draw_progress(f: &mut Frame, t: &Transfer, area: Rect) {
+    let p = &t.progress;
+    let file = if p.file.is_empty() { "開始待ち".to_string() } else { p.file.clone() };
+    let size = match p.total {
+        Some(total) => format!("{} / {}", human(p.bytes), human(total)),
+        None => human(p.bytes),
+    };
+    let ratio = match p.total {
+        Some(total) if total > 0 => (p.bytes as f64 / total as f64).clamp(0.0, 1.0),
+        Some(_) => 1.0,
+        None => 0.0,
+    };
+    let label = format!(
+        "{} {}  {file}  {size}  再送:{}  Esc で中止",
+        t.protocol.label(),
+        t.direction.label(),
+        p.errors
+    );
+    let gauge = Gauge::default()
+        .gauge_style(Style::new().fg(Color::Rgb(40, 120, 200)).bg(Color::Rgb(20, 20, 40)))
+        .ratio(ratio)
+        .label(Span::styled(label, Style::new().fg(Color::White).add_modifier(Modifier::BOLD)));
+    f.render_widget(gauge, area);
+}
+
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);
@@ -221,6 +271,40 @@ fn draw_popup(f: &mut Frame, popup: &Popup, ch: &Channel) {
                 f.render_stateful_widget(List::new(items).block(b).highlight_style(hl), area, &mut st);
             }
         }
+        Popup::Transfer { dir, proto, path, error } => {
+            let area = centered(f.area(), 64, 9);
+            f.render_widget(Clear, area);
+            let b = block(format!(" {} ファイル{} ", ch.name(), dir.label()));
+            let inner = b.inner(area);
+            f.render_widget(b, area);
+            let mut protos = vec![Span::raw(" プロトコル: ")];
+            for (i, p) in Protocol::ALL.iter().enumerate() {
+                let style = if i == *proto { hl } else { Style::new().fg(Color::Gray) };
+                protos.push(Span::styled(format!(" {} ", p.label()), style));
+                protos.push(Span::raw(" "));
+            }
+            let what = match (dir, Protocol::ALL[*proto]) {
+                (Direction::Send, Protocol::Ymodem) => "送るファイル (空白区切りで複数可)",
+                (Direction::Send, _) => "送るファイル",
+                (Direction::Recv, Protocol::Ymodem) => "保存先ディレクトリ",
+                (Direction::Recv, _) => "保存するファイル名",
+            };
+            let lines = vec![
+                Line::from(protos),
+                Line::raw(""),
+                Line::raw(format!(" {what}:")),
+                Line::from(Span::styled(format!(" {path}_"), Style::new().fg(Color::Yellow))),
+                Line::raw(""),
+                match error {
+                    Some(e) => Line::from(Span::styled(format!(" {e}"), Style::new().fg(Color::LightRed))),
+                    None => Line::from(Span::styled(
+                        " ←→ プロトコル切替  Enter 開始  Esc キャンセル",
+                        Style::new().fg(Color::DarkGray),
+                    )),
+                },
+            ];
+            f.render_widget(Paragraph::new(lines), inner);
+        }
         Popup::Help => {
             let lines = [
                 "Ctrl-A をプレフィックスにして以下のキー",
@@ -231,6 +315,7 @@ fn draw_popup(f: &mut Frame, popup: &Popup, ch: &Channel) {
                 "  p             ポート選択・接続",
                 "  r / x         再接続 / 切断",
                 "  i             モデム名を取得 (ATI3)",
+                "  u / d         X/YMODEM 送信 / 受信",
                 "  H             DTR OFF で回線切断",
                 "  e             文字コード (SJIS/UTF-8/EUC/JIS)",
                 "  n             改行コード (CR/CRLF/LF)",

@@ -1,6 +1,7 @@
 //! 1 チャンネル分のシリアルポート + VT100 画面。
 
 use std::fs::File;
+use std::path::PathBuf;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -11,6 +12,8 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use encoding_rs::{Decoder, Encoding, EUC_JP, ISO_2022_JP, SHIFT_JIS, UTF_8};
 use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
+
+use crate::transfer::{Outcome, Protocol, Transfer};
 
 pub const BAUD_RATES: &[u32] = &[
     300, 1200, 2400, 4800, 9600, 14400, 19200, 38400, 57600, 115200, 230400, 460800, 921600,
@@ -224,6 +227,10 @@ pub struct Channel {
     probe: Option<(usize, Instant)>,
     /// I/O エラー後の自動再接続 (次に試す時刻, 試行回数)
     reconnect: Option<(Instant, u32)>,
+    /// XMODEM / YMODEM 転送中
+    pub transfer: Option<Transfer>,
+    /// 直前の転送結果 (成功, メッセージ)
+    pub transfer_result: Option<(bool, String)>,
     decoder: Decoder,
     writer: Option<Box<dyn SerialPort>>,
     stop: Option<Arc<AtomicBool>>,
@@ -252,6 +259,8 @@ impl Channel {
             auto_probe: true,
             probe: None,
             reconnect: None,
+            transfer: None,
+            transfer_result: None,
             decoder: encoding.new_decoder_without_bom_handling(),
             writer: None,
             stop: None,
@@ -384,6 +393,10 @@ impl Channel {
         }
         // 古い reader スレッドからのイベントを無視するため世代を進める
         self.generation += 1;
+        if let Some(t) = self.transfer.take() {
+            let msg = format!("{} {}失敗: ポートが閉じられました", t.protocol.label(), t.direction.label());
+            self.transfer_result = Some((false, msg));
+        }
         if self.writer.take().is_some() {
             self.status = "切断".into();
         }
@@ -435,6 +448,13 @@ impl Channel {
         match ev {
             SerialEvent::Data { generation, data, .. } if generation == self.generation => {
                 self.rx_bytes += data.len() as u64;
+                if let Some(t) = self.transfer.as_mut() {
+                    // 転送中の受信データは画面に出さずプロトコルへ渡す
+                    let out = t.input(&data, Instant::now());
+                    self.write_bytes(&out);
+                    self.finish_transfer();
+                    return;
+                }
                 if let Some(log) = self.log.as_mut() {
                     let _ = log.write_all(&data);
                 }
@@ -543,18 +563,44 @@ impl Channel {
         self.write_raw(&bytes);
     }
 
-    pub fn write_raw(&mut self, bytes: &[u8]) {
+    /// ローカルエコーなしで送信する。書き込みのタイムアウトは待ち続け、10 秒進まなければエラー
+    fn write_bytes(&mut self, bytes: &[u8]) -> bool {
         if bytes.is_empty() {
-            return;
+            return true;
         }
-        if let Some(w) = self.writer.as_mut() {
-            match w.write_all(bytes).and_then(|_| w.flush()) {
-                Ok(()) => self.tx_bytes += bytes.len() as u64,
-                Err(e) => {
-                    self.fail(format!("送信エラー: {e}"));
-                    return;
-                }
+        let Some(w) = self.writer.as_mut() else { return false };
+        let mut rest = bytes;
+        let mut last_progress = Instant::now();
+        let result = loop {
+            if rest.is_empty() {
+                break w.flush();
             }
+            match w.write(rest) {
+                Ok(n) if n > 0 => {
+                    rest = &rest[n..];
+                    last_progress = Instant::now();
+                }
+                Ok(_) => {}
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => {}
+                Err(e) => break Err(e),
+            }
+            if last_progress.elapsed() > Duration::from_secs(10) {
+                break Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "送信が進みません"));
+            }
+        };
+        self.tx_bytes += (bytes.len() - rest.len()) as u64;
+        match result {
+            Ok(()) => true,
+            Err(e) => {
+                self.fail(format!("送信エラー: {e}"));
+                false
+            }
+        }
+    }
+
+    pub fn write_raw(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() || (self.writer.is_some() && !self.write_bytes(bytes)) {
+            return;
         }
         if self.local_echo {
             let mut dec = self.encoding.new_decoder_without_bom_handling();
@@ -573,6 +619,66 @@ impl Channel {
         let (bytes, _, _) = self.encoding.encode(&s);
         let bytes = bytes.into_owned();
         self.write_raw(&bytes);
+    }
+
+    /// XMODEM / YMODEM 送信を始める
+    pub fn start_upload(&mut self, protocol: Protocol, files: Vec<PathBuf>) -> Result<()> {
+        self.check_can_transfer()?;
+        let t = Transfer::send(protocol, files, Instant::now())?;
+        self.status = format!("{} 送信中", protocol.label());
+        self.transfer = Some(t);
+        Ok(())
+    }
+
+    /// XMODEM / YMODEM 受信を始める (`dest` は XMODEM ならファイル名、YMODEM ならディレクトリ)
+    pub fn start_download(&mut self, protocol: Protocol, dest: PathBuf) -> Result<()> {
+        self.check_can_transfer()?;
+        let (t, out) = Transfer::recv(protocol, dest, Instant::now())?;
+        self.status = format!("{} 受信中", protocol.label());
+        self.transfer = Some(t);
+        self.write_bytes(&out);
+        Ok(())
+    }
+
+    fn check_can_transfer(&self) -> Result<()> {
+        if !self.is_open() {
+            bail!("{} は未接続です", self.name());
+        }
+        if self.transfer.is_some() {
+            bail!("{} は転送中です", self.name());
+        }
+        Ok(())
+    }
+
+    pub fn cancel_transfer(&mut self) {
+        if let Some(t) = self.transfer.as_mut() {
+            let out = t.cancel();
+            self.write_bytes(&out);
+            self.finish_transfer();
+        }
+    }
+
+    /// 転送のタイムアウト処理。状態が変わったら true
+    pub fn poll_transfer(&mut self) -> bool {
+        let Some(t) = self.transfer.as_mut() else { return false };
+        let out = t.tick(Instant::now());
+        let changed = !out.is_empty();
+        self.write_bytes(&out);
+        changed | self.finish_transfer()
+    }
+
+    /// 転送が終わっていれば後始末する。終わったら true
+    fn finish_transfer(&mut self) -> bool {
+        let Some(t) = self.transfer.as_ref() else { return false };
+        let result = match &t.outcome {
+            Outcome::Running => return false,
+            Outcome::Done(msg) => (true, format!("{} {}完了: {msg}", t.protocol.label(), t.direction.label())),
+            Outcome::Failed(msg) => (false, format!("{} {}失敗: {msg}", t.protocol.label(), t.direction.label())),
+        };
+        self.status = result.1.clone();
+        self.transfer_result = Some(result);
+        self.transfer = None;
+        true
     }
 
     pub fn toggle_log(&mut self) {

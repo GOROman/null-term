@@ -15,7 +15,8 @@ use clap::Subcommand;
 use regex::Regex;
 use serde_json::{json, Value};
 
-use crate::channel::{self, encoding_label, Newline};
+use crate::channel::{self, encoding_label, Channel, Newline};
+use crate::transfer::Protocol;
 use crate::App;
 
 pub fn default_socket() -> PathBuf {
@@ -97,6 +98,24 @@ fn parse_ch(v: &Value, app: &App) -> Result<usize> {
         "A" | "1" => Ok(0),
         "B" | "2" => Ok(1),
         _ => bail!("ch は A / B (または 1 / 2): {s}"),
+    }
+}
+
+fn transfer_status(ch: &Channel) -> Value {
+    let result = ch.transfer_result.as_ref().map(|(ok, msg)| json!({ "ok": ok, "message": msg }));
+    match &ch.transfer {
+        Some(t) => json!({
+            "running": true,
+            "protocol": t.protocol.label(),
+            "direction": t.direction.label(),
+            "file": t.progress.file,
+            "bytes": t.progress.bytes,
+            "total": t.progress.total,
+            "files_done": t.progress.files_done,
+            "errors": t.progress.errors,
+            "last_result": result,
+        }),
+        None => json!({ "running": false, "last_result": result }),
     }
 }
 
@@ -233,6 +252,33 @@ fn dispatch(app: &mut App, v: &Value) -> Result<Dispatch> {
                 bail!("{}", ch.status);
             }
             ok(channel_status(app, i))
+        }
+        "upload" => {
+            let proto = Protocol::parse(v.get("protocol").and_then(Value::as_str).unwrap_or("ymodem"))?;
+            let files: Vec<PathBuf> = v
+                .get("files")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("files が必要です"))?
+                .iter()
+                .filter_map(|f| f.as_str().map(crate::expand_path))
+                .collect();
+            ch.start_upload(proto, files)?;
+            ok(transfer_status(ch))
+        }
+        "download" => {
+            let proto = Protocol::parse(v.get("protocol").and_then(Value::as_str).unwrap_or("ymodem"))?;
+            let default = if proto == Protocol::Ymodem { "." } else { "" };
+            let path = v.get("path").and_then(Value::as_str).unwrap_or(default);
+            if path.is_empty() {
+                bail!("XMODEM は保存するファイル名 (path) が必要です");
+            }
+            ch.start_download(proto, crate::expand_path(path))?;
+            ok(transfer_status(ch))
+        }
+        "transfer" => ok(transfer_status(ch)),
+        "cancel" => {
+            ch.cancel_transfer();
+            ok(transfer_status(ch))
         }
         "hangup" => {
             ch.hangup();
@@ -412,6 +458,31 @@ pub enum CtlCmd {
     Close { ch: String },
     /// DTR を一旦落としてモデムに回線を切らせる
     Hangup { ch: String },
+    /// XMODEM / YMODEM でファイルを送信
+    Upload {
+        ch: String,
+        #[arg(required = true)]
+        files: Vec<String>,
+        /// xmodem / xmodem-1k / ymodem
+        #[arg(short, long, default_value = "ymodem")]
+        protocol: String,
+        /// 転送が終わるまで待つ (進捗は標準エラーへ)
+        #[arg(short, long)]
+        wait: bool,
+    },
+    /// XMODEM / YMODEM でファイルを受信 (path: XMODEM は保存ファイル名、YMODEM は保存先ディレクトリ)
+    Download {
+        ch: String,
+        path: Option<String>,
+        #[arg(short, long, default_value = "ymodem")]
+        protocol: String,
+        #[arg(short, long)]
+        wait: bool,
+    },
+    /// 転送の状態 (JSON)
+    Transfer { ch: String },
+    /// 転送を中止
+    Cancel { ch: String },
     /// ATI3 でモデム名を再取得 (結果は status の modem)
     Identify { ch: String },
     /// 文字コード (sjis / utf8 / eucjp / jis)
@@ -456,6 +527,40 @@ fn request(stream: &mut UnixStream, reader: &mut BufReader<UnixStream>, req: &Va
     Ok(serde_json::from_str(&line)?)
 }
 
+fn absolute(p: &Path) -> Result<String> {
+    let p = if p.is_absolute() { p.to_path_buf() } else { std::env::current_dir()?.join(p) };
+    Ok(p.display().to_string())
+}
+
+/// 転送が終わるまで状態を問い合わせ、進捗を標準エラーに出す
+fn wait_transfer(stream: &mut UnixStream, reader: &mut BufReader<UnixStream>, ch: &str) -> Result<i32> {
+    loop {
+        let st = request(stream, reader, &json!({"cmd": "transfer", "ch": ch}))?;
+        if st["running"] != json!(true) {
+            eprintln!();
+            let r = &st["last_result"];
+            let msg = r["message"].as_str().unwrap_or("結果不明");
+            if r["ok"] == json!(true) {
+                println!("{msg}");
+                return Ok(0);
+            }
+            eprintln!("error: {msg}");
+            return Ok(1);
+        }
+        let total = st["total"].as_u64().map(|t| format!(" / {t}")).unwrap_or_default();
+        eprint!(
+            "\r{} {} {}  {}{} bytes  再送 {}   ",
+            st["protocol"].as_str().unwrap_or(""),
+            st["direction"].as_str().unwrap_or(""),
+            st["file"].as_str().unwrap_or(""),
+            st["bytes"],
+            total,
+            st["errors"]
+        );
+        thread::sleep(Duration::from_millis(500));
+    }
+}
+
 /// CLI クライアント。戻り値はプロセスの終了コード
 pub fn client(socket: &Path, cmd: CtlCmd) -> Result<i32> {
     let mut stream = UnixStream::connect(socket).with_context(|| {
@@ -463,6 +568,7 @@ pub fn client(socket: &Path, cmd: CtlCmd) -> Result<i32> {
     })?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut plain_text = false;
+    let mut wait_ch: Option<String> = None;
     let mut reqs = vec![];
     match cmd {
         CtlCmd::Status => reqs.push(json!({"cmd": "status"})),
@@ -497,6 +603,22 @@ pub fn client(socket: &Path, cmd: CtlCmd) -> Result<i32> {
         }
         CtlCmd::Close { ch } => reqs.push(json!({"cmd": "close", "ch": ch})),
         CtlCmd::Hangup { ch } => reqs.push(json!({"cmd": "hangup", "ch": ch})),
+        CtlCmd::Upload { ch, files, protocol, wait } => {
+            // null-term 本体とカレントディレクトリが違ってもよいよう絶対パスにする
+            let files: Vec<String> = files
+                .iter()
+                .map(|f| absolute(&crate::expand_path(f)))
+                .collect::<Result<_>>()?;
+            reqs.push(json!({"cmd": "upload", "ch": ch, "protocol": protocol, "files": files}));
+            wait_ch = wait.then_some(ch);
+        }
+        CtlCmd::Download { ch, path, protocol, wait } => {
+            let path = path.map(|p| absolute(&crate::expand_path(&p))).transpose()?;
+            reqs.push(json!({"cmd": "download", "ch": ch, "protocol": protocol, "path": path}));
+            wait_ch = wait.then_some(ch);
+        }
+        CtlCmd::Transfer { ch } => reqs.push(json!({"cmd": "transfer", "ch": ch})),
+        CtlCmd::Cancel { ch } => reqs.push(json!({"cmd": "cancel", "ch": ch})),
         CtlCmd::Identify { ch } => reqs.push(json!({"cmd": "identify", "ch": ch})),
         CtlCmd::Encoding { ch, encoding } => {
             reqs.push(json!({"cmd": "encoding", "ch": ch, "encoding": encoding}))
@@ -520,6 +642,9 @@ pub fn client(socket: &Path, cmd: CtlCmd) -> Result<i32> {
         if last["ok"] != json!(true) {
             break;
         }
+    }
+    if let (Some(ch), true) = (wait_ch, last["ok"] == json!(true)) {
+        return wait_transfer(&mut stream, &mut reader, &ch);
     }
     let ok = last["ok"] == json!(true);
     if plain_text {

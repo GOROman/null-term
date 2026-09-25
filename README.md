@@ -38,6 +38,8 @@ cargo build --release
 | p | ポート選択・接続 |
 | r / x | ポートを再接続 / 閉じる |
 | H | DTR を一瞬 OFF にしてモデムの回線を切断 |
+| u | ファイル送信 (XMODEM / XMODEM-1K / YMODEM) |
+| d | ファイル受信 (XMODEM / XMODEM-1K / YMODEM) |
 | i | モデム名を取得 (`ATI3`) |
 | e | 文字コード切替 |
 | n | 改行コード切替 |
@@ -55,6 +57,22 @@ cargo build --release
 画面は VT100/ANSI エスケープシーケンス（カラー含む）を解釈します。
 上画面 (A) は紺、下画面 (B) はえんじの背景で表示し、タイトル行には接続状態・bps・データ形式・文字コード・送受信バイト数と、
 接続時に `ATI3` で取得したモデム名を表示します。
+
+## ファイル転送（XMODEM / YMODEM）
+
+`Ctrl-A u`（送信）/ `Ctrl-A d`（受信）でダイアログを開き、←→ でプロトコルを選んで Enter で開始します。
+転送中は画面の最下行に進捗バーが出ます。`Esc`（または `Ctrl-X`）で中止します。
+
+| プロトコル | ブロック | 誤り検出 | 備考 |
+|---|---|---|---|
+| XMODEM | 128 バイト | CRC-16（相手がチェックサム方式ならそれに合わせる） | 1 ファイルずつ。受信時は末尾の詰め物 (0x1A) を取り除く |
+| XMODEM-1K | 1024 バイト | CRC-16 | 1 ファイルずつ |
+| YMODEM | 1024 バイト | CRC-16 | 複数ファイルを一括転送。ファイル名・サイズ・更新日時も送る |
+
+- 送信: 送るファイルのパスを入力（YMODEM は空白区切りで複数指定可、`~/` も使えます）
+- 受信: XMODEM は保存するファイル名、YMODEM は保存先ディレクトリ（既定は `.`）を入力。同名ファイルがあれば `名前.1` のように別名で保存します
+- lrzsz（`sz` / `rz` / `sx` / `rx`）と相互に送受信できることを確認しています
+- DTE 速度が回線速度より速いモデム接続では、`-f rts`（RTS/CTS フロー制御）で起動すると取りこぼしを防げます
 
 ## 外部からの操作（`null-term ctl`）
 
@@ -74,6 +92,11 @@ null-term ctl sendhex A 1b5b41                          # バイト列をその�
 null-term ctl baud A 2400                               # bps 変更
 null-term ctl open B /dev/cu.usbserial-YYYY -b 9600     # ポートを開く
 null-term ctl status                                    # 状態 (JSON)
+null-term ctl upload A a.bin b.txt -p ymodem --wait     # YMODEM で送信し、終わるまで待つ
+null-term ctl download B ~/Downloads -p ymodem --wait   # YMODEM で受信
+null-term ctl download B got.bin -p xmodem              # XMODEM で受信 (待たずに戻る)
+null-term ctl transfer B                                # 転送の状態 (JSON)
+null-term ctl cancel B                                  # 転送を中止
 null-term ctl quit
 ```
 
@@ -82,6 +105,7 @@ null-term ctl quit
 - チャンネルは `A` / `B`（`1` / `2` でも可）。
 - `\N0` のように上記以外の `\X` はそのまま送られます（AT コマンドの `\N` 等に使えます）。
 - 表示が崩れたら `ctl redraw`（描き直し）/ `ctl reset`（両画面を消去して描き直し）
+- `upload` / `download` の `--wait` は、成功で 0、失敗・中止で 1 を返して終了します。
 - ほかのコマンド: `hangup` `format` `close` `identify` `encoding` `newline` `echo` `log` `clear` `focus` `ports` `raw`
 - ソケットパスは macOS では 104 バイト程度が上限です。長いディレクトリを `--socket` に指定しないでください。
 
