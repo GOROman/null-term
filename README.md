@@ -119,9 +119,3 @@ $P ctl wait B RING -t 6; $P ctl send B 'ATA\r' -x 'CONNECT' -t 70
 $P ctl wait A 'CONNECT' -t 70
 $P ctl send A 'Hello\r\n'; $P ctl wait B 'Hello' -t 10
 ```
-
-うまくいかないときの確認:
-
-- 片側だけ `ATX4DT0` で発信して `NO DIALTONE` になる → 交換機が発信音を出していない（オフフック検出・PIC 周りのハンダ不良を疑う）
-- どちら向きでも `RING` が出ず `ATS1?` が 0 のまま → 交換機のベル回路（IC3 / T2 / リレー）を確認
-- DFML-560 など Conexant 系は `AT&V1` で直前の切断理由（`TERMINATION REASON`）と受信速度が見られる
