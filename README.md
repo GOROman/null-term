@@ -143,3 +143,7 @@ $P ctl wait B RING -t 6; $P ctl send B 'ATA\r' -x 'CONNECT' -t 70
 $P ctl wait A 'CONNECT' -t 70
 $P ctl send A 'Hello\r\n'; $P ctl wait B 'Hello' -t 10
 ```
+
+## ライセンス
+
+MIT ライセンスです。詳しくは [LICENSE](LICENSE) を見てください。
