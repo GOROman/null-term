@@ -2,6 +2,12 @@
 
 パソコン通信用の 2 画面シリアルターミナル。画面を上下に分割し、USB-UART 2ch を同時に扱えます。
 
+![null-term の画面: 上 (A) に aiwa PV-PF24MK2、下 (B) に I-O DATA DFML-560 を接続し、疑似交換機越しに 2400bps V.42bis で対向接続したところ](docs/screenshot.png)
+
+*上画面 (A) に aiwa PV-PF24MK2、下画面 (B) に I-O DATA DFML-560 を接続し、疑似交換機越しに `CONNECT 2400/V.42bis` で対向接続した様子*
+
+## ビルドと起動
+
 ```
 cargo build --release
 ./target/release/null-term --list                       # ポート一覧
